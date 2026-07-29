@@ -1,0 +1,33 @@
+{
+  "name": "agentmemory-offline",
+  "version": "0.9.28-offline.2",
+  "description": "Persistent project memory with a loopback-only MCP bridge and local lifecycle capture.",
+  "author": {
+    "name": "AgentMemory contributors",
+    "url": "https://github.com/rmarquesa/agentmemory-offline"
+  },
+  "repository": "https://github.com/rmarquesa/agentmemory-offline",
+  "license": "Apache-2.0",
+  "keywords": [
+    "memory",
+    "offline",
+    "local-first",
+    "mcp",
+    "sessions"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "AgentMemory Offline",
+    "shortDescription": "Persistent project memory stored only on this machine",
+    "longDescription": "Captures project sessions through local lifecycle hooks and exposes recall tools through a loopback-only MCP bridge. Memory remains under ~/.agentmemory and no cloud account or remote memory service is used.",
+    "developerName": "AgentMemory contributors",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/rmarquesa/agentmemory-offline",
+    "defaultPrompt": "Recall relevant local project context before continuing this task."
+  },
+  "mcpServers": "./.mcp.json"
+}
