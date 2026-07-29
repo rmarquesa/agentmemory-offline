@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "agentmemory": {
+      "command": "node",
+      "args": [
+        "${CODEX_PLUGIN_ROOT}/runtime/standalone.mjs"
+      ],
+      "env": {
+        "AGENTMEMORY_URL": "http://127.0.0.1:3111",
+        "AGENTMEMORY_TOOLS": "all"
+      }
+    }
+  }
+}

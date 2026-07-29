@@ -1,0 +1,20 @@
+{
+  "name": "offline-memory",
+  "interface": {
+    "displayName": "Offline Memory"
+  },
+  "plugins": [
+    {
+      "name": "agentmemory-offline",
+      "source": {
+        "source": "local",
+        "path": "./plugins/agentmemory-offline"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

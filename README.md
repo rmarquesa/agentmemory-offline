@@ -105,6 +105,35 @@ merge these declarations with the host's existing configuration; it must not
 replace unrelated hooks or skills. The MCP manifest calls the locally installed
 `agentmemory` executable.
 
+### Native Codex Desktop plugin
+
+The offline fork now includes a native package at
+`plugins/agentmemory-offline` and a repository-local marketplace manifest at
+`.agents/plugins/marketplace.json`.
+
+Install it from a local clone:
+
+```bash
+codex plugin marketplace add /absolute/path/to/agentmemory-offline
+codex plugin add agentmemory-offline@offline-memory
+```
+
+The native package registers:
+
+- 15 project-memory skills;
+- six lifecycle hooks (`SessionStart`, `UserPromptSubmit`, `PreToolUse`,
+  `PostToolUse`, `PreCompact`, and `Stop`);
+- a self-contained MCP bridge resolved from the plugin cache;
+- a fixed loopback endpoint at `http://127.0.0.1:3111`.
+
+The package does not accept a remote memory URL. If the full local service is
+not running, its MCP bridge retains seven essential operations in
+`~/.agentmemory/standalone.json`. When the service is running, memories use its
+configured local data directory and remain grouped by repository and session.
+
+Restart Codex Desktop after installation so the newly registered skills, MCP
+server, and lifecycle hooks are discovered.
+
 ## Current limitations
 
 - Runtime network enforcement is strongest on macOS.
