@@ -1,0 +1,15 @@
+{
+  "name": "agentmemory",
+  "version": "0.9.28-offline.1",
+  "description": "Persistent memory for AI coding agents -- captures tool usage, compresses via LLM, injects context into future sessions. 6 hooks, 53 MCP tools, 8 skills, real-time viewer.",
+  "author": {
+    "name": "Rohit Ghumare",
+    "url": "https://github.com/rmarquesa"
+  },
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/rmarquesa/agentmemory-offline",
+  "repository": "https://github.com/rmarquesa/agentmemory-offline",
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "hooks": "./hooks/hooks.codex.json"
+}

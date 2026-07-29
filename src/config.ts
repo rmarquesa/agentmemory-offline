@@ -1,0 +1,393 @@
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { homedir } from "node:os";
+import pc from "picocolors";
+import type {
+  AgentMemoryConfig,
+  ProviderConfig,
+  EmbeddingConfig,
+  FallbackConfig,
+  ClaudeBridgeConfig,
+  TeamConfig,
+} from "./types.js";
+
+function safeParseInt(value: string | undefined, fallback: number): number {
+  if (!value) return fallback;
+  const parsed = parseInt(value, 10);
+  return Number.isNaN(parsed) ? fallback : parsed;
+}
+
+const DATA_DIR = join(homedir(), ".agentmemory");
+const ENV_FILE = join(DATA_DIR, ".env");
+
+let warnPremiumModelShown = false;
+
+function loadEnvFile(): Record<string, string> {
+  if (!existsSync(ENV_FILE)) return {};
+  const content = readFileSync(ENV_FILE, "utf-8");
+  const vars: Record<string, string> = {};
+  for (const line of content.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const eqIdx = trimmed.indexOf("=");
+    if (eqIdx === -1) continue;
+    const key = trimmed.slice(0, eqIdx).trim();
+    let val = trimmed.slice(eqIdx + 1).trim();
+    const quoteChar = val[0] === '"' || val[0] === "'" ? val[0] : "";
+    if (quoteChar) {
+      const closeIdx = val.indexOf(quoteChar, 1);
+      if (closeIdx !== -1) val = val.slice(1, closeIdx);
+    } else {
+      const hashIdx = val.indexOf(" #");
+      if (hashIdx !== -1) val = val.slice(0, hashIdx).trim();
+    }
+    vars[key] = val;
+  }
+  return vars;
+}
+
+function hasRealValue(v: string | undefined): v is string {
+  return typeof v === "string" && v.trim().length > 0;
+}
+
+function detectProvider(env: Record<string, string>): ProviderConfig {
+  const maxTokens = parseInt(env["MAX_TOKENS"] || "4096", 10);
+
+  // Offline invariant: credentials inherited from the shell or a legacy .env
+  // file must never activate a remote provider.
+  return {
+    provider: "noop",
+    model: "noop",
+    maxTokens,
+  };
+
+  /* Upstream provider selection is intentionally unreachable in this fork.
+     It is retained temporarily to keep the patch reviewable against upstream. */
+
+  // OpenAI-compatible: supports OpenAI, DeepSeek, SiliconFlow, Azure, vLLM, LM Studio
+  if (hasRealValue(env["OPENAI_API_KEY"]) && env["OPENAI_API_KEY_FOR_LLM"] !== "false") {
+    return {
+      provider: "openai",
+      model: env["OPENAI_MODEL"] || "gpt-4o-mini",
+      maxTokens,
+      baseURL: env["OPENAI_BASE_URL"],
+    };
+  }
+
+  // MiniMax: Anthropic-compatible API, requires raw fetch to avoid SDK stainless headers
+  if (hasRealValue(env["MINIMAX_API_KEY"])) {
+    return {
+      provider: "minimax",
+      model: env["MINIMAX_MODEL"] || "MiniMax-M2.7",
+      maxTokens,
+    };
+  }
+
+  if (hasRealValue(env["ANTHROPIC_API_KEY"])) {
+    return {
+      provider: "anthropic",
+      model: env["ANTHROPIC_MODEL"] || "claude-sonnet-4-20250514",
+      maxTokens,
+      baseURL: env["ANTHROPIC_BASE_URL"],
+    };
+  }
+  if (hasRealValue(env["GEMINI_API_KEY"]) || hasRealValue(env["GOOGLE_API_KEY"])) {
+    if (!hasRealValue(env["GEMINI_API_KEY"]) && hasRealValue(env["GOOGLE_API_KEY"])) {
+      process.stderr.write(
+        "[agentmemory] GOOGLE_API_KEY detected — treating as GEMINI_API_KEY. " +
+          "Set GEMINI_API_KEY in ~/.agentmemory/.env to silence this warning.\n",
+      );
+    }
+    return {
+      provider: "gemini",
+      model: env["GEMINI_MODEL"] || "gemini-2.5-flash",
+      maxTokens,
+    };
+  }
+  if (hasRealValue(env["OPENROUTER_API_KEY"])) {
+    const model =
+      env["OPENROUTER_MODEL"] || "anthropic/claude-sonnet-4-20250514";
+    // warn when the configured OpenRouter model is in the
+    // premium tier and likely to burn money on background compression.
+    // Captured workload data shows ~$5/35h on claude-sonnet-4 vs
+    // ~$0.46/35h on deepseek-v4-pro for the same compression mix.
+    // Heuristic match avoids hard-coding a pricing table.
+    if (
+      !warnPremiumModelShown &&
+      /sonnet|opus|gpt-4o(?!.*mini)|gpt-4-turbo/i.test(model) &&
+      env["AGENTMEMORY_SUPPRESS_COST_WARNING"] !== "1" &&
+      env["AGENTMEMORY_SUPPRESS_COST_WARNING"] !== "true"
+    ) {
+      warnPremiumModelShown = true;
+      process.stderr.write(
+        `[agentmemory] OPENROUTER_MODEL=${model} is in the premium tier. ` +
+          `Background compression on this model can cost $5+/day under active use. ` +
+          `Cheaper alternatives with comparable quality for memory compression: ` +
+          `deepseek/deepseek-v4-pro, deepseek/deepseek-chat, qwen/qwen3-coder. ` +
+          `See README "Cost-aware model selection" for the full table. ` +
+          `Set AGENTMEMORY_SUPPRESS_COST_WARNING=1 to silence.\n`,
+      );
+    }
+    return {
+      provider: "openrouter",
+      model,
+      maxTokens,
+    };
+  }
+
+  const allowAgentSdk = env["AGENTMEMORY_ALLOW_AGENT_SDK"] === "true";
+  if (!allowAgentSdk) {
+    process.stderr.write(
+      pc.dim(
+        "[agentmemory] No LLM provider key set — running zero-LLM (BM25 + on-device embeddings). " +
+          "Set ANTHROPIC_API_KEY (or GEMINI/OPENAI/OPENROUTER/MINIMAX) in ~/.agentmemory/.env for LLM compression and summaries. " +
+          "Agent-SDK fallback stays off by default to avoid a Stop-hook recursion loop; opt in with AGENTMEMORY_AUTO_COMPRESS=true + AGENTMEMORY_ALLOW_AGENT_SDK=true.\n",
+      ),
+    );
+    return {
+      provider: "noop",
+      model: "noop",
+      maxTokens,
+    };
+  }
+
+  process.stderr.write(
+    "[agentmemory] WARNING: agent-sdk fallback enabled via AGENTMEMORY_ALLOW_AGENT_SDK=true. " +
+      "This spawns @anthropic-ai/claude-agent-sdk child sessions that can trigger the Stop-hook " +
+      "recursion loop. A SDK-child env marker is set to block re-entry, " +
+      "but prefer setting a real API key in ~/.agentmemory/.env instead.\n",
+  );
+  return {
+    provider: "agent-sdk",
+    model: "claude-sonnet-4-20250514",
+    maxTokens,
+  };
+}
+
+export function loadConfig(): AgentMemoryConfig {
+  const env = getMergedEnv();
+
+  const provider = detectProvider(env);
+
+  // Port quartet: REST is the anchor; streams/engine derive from it
+  // unless individually overridden. Default anchor 3111 yields the
+  // canonical 3112 streams / 49134 engine pair, but `III_REST_PORT=3211`
+  // auto-picks 3212 + 49234 so a second instance doesn't collide.
+  const restPort = parseInt(env["III_REST_PORT"] || "3111", 10) || 3111;
+  const streamsPort =
+    parseInt(env["III_STREAM_PORT"] || env["III_STREAMS_PORT"] || "", 10) ||
+    restPort + 1;
+  const engineUrl =
+    env["III_ENGINE_URL"] ||
+    `ws://localhost:${
+      parseInt(env["III_ENGINE_PORT"] || "", 10) || restPort + 46023
+    }`;
+
+  return {
+    engineUrl,
+    restPort,
+    streamsPort,
+    provider,
+    tokenBudget: safeParseInt(env["TOKEN_BUDGET"], 2000),
+    maxObservationsPerSession: safeParseInt(env["MAX_OBS_PER_SESSION"], 500),
+    compressionModel: provider.model,
+    dataDir: DATA_DIR,
+  };
+}
+
+function getMergedEnv(
+  overrides?: Record<string, string>,
+): Record<string, string> {
+  const fileEnv = loadEnvFile();
+  return { ...fileEnv, ...process.env, ...overrides } as Record<string, string>;
+}
+
+export function getEnvVar(key: string): string | undefined {
+  return getMergedEnv()[key];
+}
+
+export function isDropStaleIndexEnabled(): boolean {
+  return getMergedEnv()["AGENTMEMORY_DROP_STALE_INDEX"] === "true";
+}
+
+export function detectLlmProviderKind(): "llm" | "noop" {
+  return "noop";
+  /* Offline fork: remote provider detection is intentionally disabled.
+  const env = getMergedEnv();
+  if (
+    hasRealValue(env["ANTHROPIC_API_KEY"]) ||
+    hasRealValue(env["GEMINI_API_KEY"]) ||
+    hasRealValue(env["GOOGLE_API_KEY"]) ||
+    hasRealValue(env["OPENROUTER_API_KEY"]) ||
+    hasRealValue(env["MINIMAX_API_KEY"]) ||
+    (hasRealValue(env["OPENAI_API_KEY"]) &&
+      env["OPENAI_API_KEY_FOR_LLM"] !== "false")
+  ) {
+    return "llm";
+  }
+  return "noop";
+  */
+}
+
+export function loadEmbeddingConfig(): EmbeddingConfig {
+  return {
+    provider: undefined,
+    bm25Weight: 1,
+    vectorWeight: 0,
+  };
+}
+
+export function detectEmbeddingProvider(
+  _env?: Record<string, string>,
+): string | null {
+  return null;
+}
+
+export function loadClaudeBridgeConfig(): ClaudeBridgeConfig {
+  const env = getMergedEnv();
+  const enabled = env["CLAUDE_MEMORY_BRIDGE"] === "true";
+  const projectPath = env["CLAUDE_PROJECT_PATH"] || "";
+  const lineBudget = safeParseInt(env["CLAUDE_MEMORY_LINE_BUDGET"], 200);
+  let memoryFilePath = "";
+  if (enabled && projectPath) {
+    // Claude Code stores MEMORY.md at
+    //   ~/.claude/projects/<slug>/MEMORY.md
+    // where <slug> is the project path with `/` and `\` swapped for `-`.
+    // The leading `-` from an absolute POSIX path is preserved (Claude
+    // Code keeps it; stripping it produced a slug Claude never reads).
+    // There's also no `memory/` subdirectory — the file sits directly
+    // under the slug dir.
+    const safePath = projectPath.replace(/[/\\]/g, "-");
+    memoryFilePath = join(
+      homedir(),
+      ".claude",
+      "projects",
+      safePath,
+      "MEMORY.md",
+    );
+  }
+  return { enabled, projectPath, memoryFilePath, lineBudget };
+}
+
+export function loadTeamConfig(): TeamConfig | null {
+  const env = getMergedEnv();
+  const teamId = env["TEAM_ID"];
+  const userId = env["USER_ID"];
+  if (!teamId || !userId) return null;
+  const mode = env["TEAM_MODE"] === "shared" ? "shared" : "private";
+  return { teamId, userId, mode };
+}
+
+// optional AGENT_ID env for multi-agent memory isolation.
+// Returns null when unset so memory stays unscoped (legacy behavior).
+// Trimmed + length-capped to keep KV writes well-formed.
+//
+// Filtering is gated by AGENTMEMORY_AGENT_SCOPE:
+//   "shared"   (default) — tag everything, do not filter recall paths
+//   "isolated"           — tag everything AND filter recall paths
+export function loadAgentScope(): {
+  agentId: string;
+  mode: "shared" | "isolated";
+} | null {
+  const env = getMergedEnv();
+  const raw = env["AGENT_ID"];
+  if (!raw) return null;
+  const agentId = raw.trim().slice(0, 128);
+  if (!agentId) return null;
+  const mode = env["AGENTMEMORY_AGENT_SCOPE"] === "isolated"
+    ? "isolated"
+    : "shared";
+  return { agentId, mode };
+}
+
+export function getAgentId(): string | undefined {
+  return loadAgentScope()?.agentId;
+}
+
+// True only when AGENT_ID is set AND scope=isolated. Recall paths
+// consult this to decide whether to filter.
+export function isAgentScopeIsolated(): boolean {
+  return loadAgentScope()?.mode === "isolated";
+}
+
+export function loadSnapshotConfig(): {
+  enabled: boolean;
+  interval: number;
+  dir: string;
+} {
+  const env = getMergedEnv();
+  return {
+    enabled: env["SNAPSHOT_ENABLED"] === "true",
+    interval: safeParseInt(env["SNAPSHOT_INTERVAL"], 3600),
+    dir: env["SNAPSHOT_DIR"] || join(homedir(), ".agentmemory", "snapshots"),
+  };
+}
+
+export function isGraphExtractionEnabled(): boolean {
+  return false;
+}
+
+export function getGraphBatchSize(): number {
+  return safeParseInt(getMergedEnv()["GRAPH_EXTRACTION_BATCH_SIZE"], 10);
+}
+
+// window for the smart-search followup-rate diagnostic. A second
+// search arriving within this many seconds (with disjoint results)
+// counts as a "follow-up" — a directional signal that the first result
+// set didn't satisfy. Long values overcount (legitimate refinement
+// looks like a follow-up); short values undercount.
+const FOLLOWUP_WINDOW_DEFAULT_SECONDS = 30;
+
+export function getFollowupWindowSeconds(): number {
+  return safeParseInt(
+    getMergedEnv()["AGENTMEMORY_FOLLOWUP_WINDOW_SECONDS"],
+    FOLLOWUP_WINDOW_DEFAULT_SECONDS,
+  );
+}
+
+export function isConsolidationEnabled(): boolean {
+  return false;
+}
+
+// Per-observation LLM compression is OFF by default as of 0.8.8.
+// When disabled, observations are captured and indexed via a synthetic
+// (zero-LLM) compression path so recall/search still works. Users who want
+// richer LLM-generated summaries can set AGENTMEMORY_AUTO_COMPRESS=true in
+// ~/.agentmemory/.env — but should expect their Claude API token usage to
+// climb proportionally with session tool-use frequency.
+export function isAutoCompressEnabled(): boolean {
+  return false;
+}
+
+// Hook-level context injection into Claude Code's conversation is OFF by
+// default as of 0.8.10. When disabled, pre-tool-use and
+// session-start hooks still POST observations for background capture, but
+// never write context to stdout — so Claude Code doesn't inject an extra
+// ~4000-char blob into every tool turn. 0.8.8 stopped the agentmemory-side
+// Claude calls (via ANTHROPIC_API_KEY); this stops the Claude Code-side
+// token burn where every tool call silently grew the model input window.
+// Users who want the in-conversation context injection explicitly opt in
+// with AGENTMEMORY_INJECT_CONTEXT=true and get a loud startup warning.
+export function isContextInjectionEnabled(): boolean {
+  return getMergedEnv()["AGENTMEMORY_INJECT_CONTEXT"] === "true";
+}
+
+export function getConsolidationDecayDays(): number {
+  return safeParseInt(getMergedEnv()["CONSOLIDATION_DECAY_DAYS"], 30);
+}
+
+export function isStandaloneMcp(): boolean {
+  return getMergedEnv()["STANDALONE_MCP"] === "true";
+}
+
+export function getStandalonePersistPath(): string {
+  const env = getMergedEnv();
+  return (
+    env["STANDALONE_PERSIST_PATH"] ||
+    join(homedir(), ".agentmemory", "standalone.json")
+  );
+}
+
+export function loadFallbackConfig(): FallbackConfig {
+  return { providers: [] };
+}

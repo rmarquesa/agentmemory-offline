@@ -1,0 +1,8 @@
+(version 1)
+(allow default)
+
+; The bundled iii engine is allowed to talk only to this Mac's loopback.
+(deny network-outbound)
+(allow network-outbound (remote ip "localhost:*"))
+(deny network-inbound)
+(allow network-inbound (local ip "localhost:*"))
